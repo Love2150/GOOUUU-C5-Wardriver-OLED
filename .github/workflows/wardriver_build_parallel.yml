@@ -128,6 +128,13 @@ jobs:
           repository: adafruit/Adafruit-GFX-Library
           ref: 1.12.1
           path: CustomAdafruit-GFX-Library
+
+      - name: Install Adafruit SSD1306
+        uses: actions/checkout@v4
+        with:
+          repository: adafruit/Adafruit_SSD1306
+          ref: 2.5.15
+          path: CustomAdafruit_SSD1306
           
       - name: Install Adafruit-ST7735-Library
         uses: actions/checkout@v2

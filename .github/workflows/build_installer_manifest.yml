@@ -100,6 +100,11 @@ jobs:
           path: build-libraries/CustomAdafruit_GFX
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          repository: adafruit/Adafruit_SSD1306
+          ref: 2.5.15
+          path: build-libraries/CustomAdafruit_SSD1306
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
           repository: adafruit/Adafruit-ST7735-Library
           ref: 1.11.0
           path: build-libraries/CustomAdafruit_ST7735
