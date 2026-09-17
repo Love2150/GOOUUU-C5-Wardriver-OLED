@@ -1,0 +1,304 @@
+#pragma once
+#ifndef WiFiOps_h
+#define WiFiOps_h
+
+#include "configs.h"
+#include "utils.h"
+#include "settings.h"
+#include "GpsInterface.h"
+#include "Buffer.h"
+#include "display.h"
+#include "BatteryInterface.h"
+#include "SDInterface.h"
+
+#include <esp_now.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <SPIFFS.h>
+#include <ArduinoJson.h>
+#include "esp_wifi.h"
+#include "esp_wifi_types.h"
+#include "mbedtls/sha256.h"
+
+#include <NimBLEDevice.h> // 2.3.0
+
+extern GpsInterface gps;
+extern SDInterface sd_obj;
+extern Buffer buffer;
+extern Utils utils;
+extern Settings settings;
+extern Display display;
+extern BatteryInterface battery;
+extern WebServer server;
+
+// ============================================================
+// Chunk 5: Geofence entry struct
+// Populated from settings "geo_0".."geo_4" JSON strings.
+// ============================================================
+struct GeofenceEntry {
+  float  lat   = 0.0f;
+  float  lon   = 0.0f;
+  int    rad   = 0;      // radius in metres; 0 = unconfigured
+  String label = "";
+  bool   valid = false;  // true when rad > 0 and lat/lon non-zero
+};
+
+#define WIGLE_UPLOAD 0
+#define WDG_UPLOAD   1
+#define BOTH_UPLOAD  2
+#define WIFI_STANDBY    0
+#define WIFI_WARDRIVING 1
+#define WIFI_UPDATE     2
+
+#define MAX_NODES 24
+#define NODE_TIMEOUT_MS 60000
+#define ADMIN_WAIT_MS 300
+#define DEBUG_OUTPUT_DELAY 30000
+
+#define NODE_FLAG_ACTIVE       0x01
+#define NODE_FLAG_ENCRYPTED    0x02
+#define NODE_FLAG_ADMIN_DIRTY  0x04
+
+typedef struct __attribute__((packed)) {
+  char     magic[4];               // "ENOW"
+  uint8_t  type;                   // MSG_TEXT
+  uint32_t counter;                // heartbeat counter (valid for MSG_HEARTBEAT)
+  uint16_t len;                    // number of bytes in text (not including NUL)
+  char     text[ENOW_TEXT_MAX + 1];  // +1 for NUL terminator
+} enow_text_msg_t;
+
+typedef struct __attribute__((packed)) {
+  char    magic[4];
+  uint8_t type;               // MSG_ADMIN
+  uint8_t assignment_version;
+  uint8_t node_index;
+  uint8_t node_count;
+  uint8_t start_channel_idx;
+  uint8_t end_channel_idx;
+} enow_admin_msg_t;
+
+struct WardriveRecord {
+  String bssid;
+  String essid;
+  String security;
+  int    channel;
+  int    rssi;
+  String type;
+};
+
+struct NodeRecord {
+  uint16_t mac_suffix;
+  uint32_t last_seen_ms;
+  uint8_t assigned_index;
+  uint8_t start_channel_idx;
+  uint8_t end_channel_idx;
+  uint8_t last_admin_version_sent;
+  uint8_t flags;
+};
+
+class WiFiOps
+{
+  private:
+    NimBLEScan* pBLEScan;
+    bool ble_initialized = false;
+
+    wifi_country_t country = {
+      .cc = "PH",
+      .schan = 1,
+      .nchan = 13,
+      .policy = WIFI_COUNTRY_POLICY_AUTO,
+    };
+    uint32_t dock_depart_time = 0;  // timestamp of last dock departure
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+
+    const char* apSSID = "c5wardriver";
+    const char* apPassword = "c5wardriver";
+
+    WiFiClientSecure *client = new WiFiClientSecure();
+
+    String user_ap_ssid = "";
+    String user_ap_password = "";
+    String wigle_user = "";
+    String wigle_token = "";
+
+    bool connected_as_client = false;
+
+    uint8_t current_scan_mode;
+    uint32_t init_time;
+    struct mac_addr mac_history[mac_history_len];
+
+    uint32_t current_net_count = 0;
+    uint32_t current_2g4_count = 0;
+    uint32_t current_5g_count = 0;
+    uint32_t current_ble_count = 0;
+    uint32_t total_net_count = 0;
+    uint32_t total_ble_count = 0;
+
+    void startNextNodeAssignedScan();
+    void resetSoloYieldScan();
+    void startNextSoloChannelScan();
+    void completeSoloChannelScan(uint16_t new_unique_networks);
+    void runAdminWindowAfterScanCycle();
+    void debugPrintNodeTable();
+    void handleNodeTopologyChange();
+    void markAllActiveNodesAdminDirty();
+    int findNodeByMacSuffix(uint16_t suffix);
+    int findNodeByMac(const uint8_t* mac);
+    int allocateNodeSlot(const uint8_t* mac);
+    bool removeStaleNodes();
+    void recalculateChannelAssignments();
+    int touchNode(const uint8_t* mac, bool& isNewNode);
+    uint8_t getNodeStartChannel(uint8_t slot);
+    uint8_t getNodeEndChannel(uint8_t slot);
+    uint8_t getActiveNodeCount();
+    void showCountdown();
+    int runWardrive(uint32_t currentTime);
+    void scanBLE();
+    bool mac_cmp(struct mac_addr addr1, struct mac_addr addr2);
+    void clearMacHistory();
+    String security_int_to_string(int security_type);
+    uint16_t processWardrive(uint16_t networks);
+    void shutdownAccessPoint(bool ap_active = true);
+    bool isSSIDExcluded(const String& ssid, const String* list, int count); // Chunk 4
+
+    // --------------------------------------------------------
+    // Chunk 5: Geofence private members
+    // --------------------------------------------------------
+    GeofenceEntry geo_cache[MAX_GEOFENCES]; // parsed geofence entries
+    bool          geo_cache_loaded  = false;
+    bool          geo_display_shown = false; // tracks TFT state to avoid redraw spam
+
+    void  loadGeofenceCache();
+    float haversineDistance(float lat1, float lon1,
+                            float lat2, float lon2);
+
+    // --------------------------------------------------------
+    // Chunk 6: Dock mode private state and methods
+    // --------------------------------------------------------
+    int      dock_state            = DOCK_STATE_NONE;
+    int      dock_connect_attempts = 0;
+    uint32_t dock_fail_time        = 0;
+    uint32_t dock_last_scan_time   = 0;
+    int      dock_depart_count     = 0;
+    uint32_t geo_passive_scan_time = 0; // for geofence-paused trigger scans
+    uint32_t standby_scan_time     = 0; // for periodic K1T scan in standby (no GPS)
+    bool     dock_webui_only       = false; // true = Tier 1 (web UI only, no GPS fix)
+
+    bool scanForTriggerSSID();    // synchronous passive scan for trigger SSID
+    void runDockMode(uint32_t currentTime);
+    void handleDockConnecting();
+    void handleDockUploading();
+    void handleDockMonitoring(uint32_t currentTime);
+    void departDock();
+
+  public:
+    #ifdef CORE
+      int run_mode = CORE_MODE;
+    #elif defined(NODE)
+      int run_mode = NODE_MODE;
+    #else
+      int run_mode = SOLO_MODE;
+    #endif
+
+    uint mac_history_cursor = 0;
+    bool clientConnected = false;
+    bool serving = false;
+    uint32_t last_web_client_activity;
+    uint32_t last_timer;
+    bool use_encryption = false;
+    bool isDocked() { return dock_state != DOCK_STATE_NONE; }
+    uint8_t getNodeCount() { return getActiveNodeCount(); }
+
+    uint8_t current_assignment_version = 1;
+    uint8_t current_assigned_scan_idx = 0;
+
+    String esp_now_key = "";
+
+    // --------------------------------------------------------
+    // Chunk 5: Geofence public state
+    // --------------------------------------------------------
+    bool   in_geofence       = false;
+    String current_geo_label = "";
+    void   reloadGeofenceCache(); // call after settings change
+    bool checkGeofences(char* dist_str = nullptr, size_t dist_str_len = 0); // returns true if current pos is inside any zone
+
+    // --------------------------------------------------------
+    // Chunk 6: Dock mode public state
+    // --------------------------------------------------------
+    String dock_ip = ""; // IP address shown on TFT while docked
+
+    bool begin(bool skip_admin = false);
+    void main(uint32_t currentTime, bool in_sd_files = false);
+    void startLog(String file_name);
+    void initBLE();
+    void initWiFi(bool set_country = false);
+    void deinitBLE();
+    void deinitWiFi();
+    bool tryConnectToWiFi(unsigned long timeoutMs = STATION_CONNECT_TIMEOUT);
+    //bool backendUpload(String filePath, uint8_t upload_type = WIGLE_UPLOAD);
+    bool wigleUpload(String filePath);
+
+
+    // --------------------------------------------------------
+    // Chunk 3: WDG Wars upload + sidecar tracking system
+    // --------------------------------------------------------
+    bool wdgwarsUpload(String filePath);       // upload one file to WDG Wars
+    bool sidecarExists(String filePath,
+                       String service);        // check .wigle / .wdg sidecar
+    void writeSidecar(String filePath,
+                      String service);         // write sidecar on success
+    bool uploadFile(String filePath,
+                    bool retry = false,
+                    uint8_t upload_type = WIGLE_UPLOAD);       // upload to both services (sidecar-aware)
+    void uploadAllPending();                   // scan SD and upload all files missing sidecars
+    void setCurrentScanMode(uint8_t scan_mode);
+    uint8_t getCurrentScanMode();
+    void setTotalNetCount(uint32_t count);
+    void setTotalBLECount(uint32_t count);
+    void setCurrentNetCount(uint32_t count);
+    void setCurrent2g4Count(uint32_t count);
+    void setCurrent5gCount(uint32_t count);
+    void setCurrentBLECount(uint32_t count);
+    uint32_t getTotalNetCount();
+    uint32_t getTotalBLECount();
+    uint32_t getCurrentNetCount();
+    uint32_t getCurrent2g4Count();
+    uint32_t getCurrent5gCount();
+    uint32_t getCurrentBLECount();
+    size_t getSoloChannelCount();
+    uint8_t getSoloChannel(size_t index);
+    uint16_t getSoloChannelPopularity(size_t index);
+    uint16_t getPeakSoloChannelPopularity();
+    bool seen_mac(unsigned char* mac);
+    void save_mac(unsigned char* mac);
+    void startESPNow();
+    bool getHasCore();
+    bool getSecureReady();
+    bool getNodeReady();
+    bool sendEncryptedStringToCore(const String& s);
+    bool sendBroadcastStringPlain(const String& s);
+    bool parseWardriveLine(const enow_text_msg_t& msg, WardriveRecord& out);
+    int getAuthType(const wifi_promiscuous_pkt_t *ppkt);
+
+    void startAccessPoint();
+    void serveConfigPage();
+    bool monitorAP(unsigned long timeoutMs = WEB_PAGE_TIMEOUT);
+    bool checkAuth(); // Chunk 1: Basic Auth check for web UI
+
+    static void setFixedChannel(uint8_t ch);
+    static bool addPeerWithMode(const uint8_t* mac, bool encrypt, const uint8_t lmk16[16]);
+    static void sendCoreRequest();
+    static void sendCoreReply(const uint8_t* destMac);
+    static bool sendAdminToNodeSlot(uint8_t slot, const uint8_t* dest_mac);
+    static void sendHeartbeat();
+    static void OnDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len);
+    static void derive_key_16(const String& s, uint8_t out16[16]);
+    static void computeKeysFromEnowKey();
+    static uint16_t macToSuffix(const uint8_t* mac);
+    static void macSuffixToStr(uint16_t suffix, char* out6);
+
+};
+
+#endif

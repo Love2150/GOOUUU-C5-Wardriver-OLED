@@ -1,0 +1,64 @@
+#pragma once
+
+#ifndef SDInterface_h
+#define SDInterface_h
+
+#include "configs.h"
+
+#include "settings.h"
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
+#include "Buffer.h"
+#include "display.h"
+#include "utils.h"
+#include "logger.h"
+#include <Update.h>
+
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_err.h"
+
+extern Buffer buffer;
+extern Settings settings;
+extern Display display;
+
+#ifdef KIT
+  #define SD_DET 4
+#endif
+
+class SDInterface {
+
+  private:
+    //SPIClass *spiExt;
+    SPIClass* _spi;
+    int _cs;
+    String update_bin_file;
+    bool checkDetectPin();
+    String findFirstBinFile(const String& dirPath);
+
+  public:
+    SDInterface(SPIClass* spi, int cs);
+
+    uint8_t cardType;
+    uint64_t cardSizeMB;
+    bool supported = false;
+
+    String card_sz;
+
+    String selected_file_name = "";
+  
+    bool initSD();
+
+    LinkedList<String>* sd_files;
+
+    void listDir(String str_dir);
+    void listDirToLinkedList(LinkedList<String>* file_names, String str_dir = "/", String ext = "");
+    File getFile(String path);
+    void runUpdate();
+    bool performUpdate(Stream &updateSource, size_t updateSize);
+    void main();
+    bool removeFile(String file_path);
+};
+
+#endif
